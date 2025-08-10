@@ -42,12 +42,13 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None):
     organ_pc_collection = {}
     organ_bool_lap = []
     for label, organ in label_classes.items():
+        print(f"Processing organ: {organ} with label: {label} and color: {label_colors[label]}")
         organ_mask = (lap_mask == int(label)).astype(np.uint8)  # Create a mask for the specific organ
         # Check if organ exists in the data
         if np.sum(organ_mask) == 0:
             print(f"Skipping {organ} (label {label}) - not present in this scan")
             organ_bool_lap.append(False)
-            organ_pc_collection[label] = None
+            # organ_pc_collection[organ] = None
             continue
         organ_bool_lap.append(True)
 
@@ -64,11 +65,15 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None):
                         intrinsic=o3d.camera.PinholeCameraIntrinsic(
                         width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy))
         # Add the organ point cloud to the collection
-        organ_pc_collection[label] = single_seg_point_cloud
+        organ_pc_collection[organ] = single_seg_point_cloud
 
-    # Visualize the point clouds for each organ
-    o3d.visualization.draw_geometries([pc for pc in organ_pc_collection.values() if pc is not None], mesh_show_back_face=True)
-
+    # # Visualize the point clouds for each organ
+    # try:
+    #     o3d.visualization.draw_geometries([pc for pc in organ_pc_collection.values() if pc is not None], mesh_show_back_face=True)
+    # except Exception as e:
+    #     print(f"Error visualizing point clouds: {e}")
+    #     return organ_pc_collection, organ_bool_lap
+    
     # Save individual organ point clouds or combine them
     valid_point_clouds = [pc for pc in organ_pc_collection.values() if pc is not None]
     if valid_point_clouds:
@@ -77,18 +82,18 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None):
         filename = os.path.basename(lap_path)
         name_without_ext = os.path.splitext(filename)[0]
         
-        # Option 1: Save combined point cloud
-        combined_pc = valid_point_clouds[0]
-        for pc in valid_point_clouds[1:]:
-            combined_pc += pc
-        combined_path = os.path.join(base_dir, name_without_ext + "_combined.ply")
-        o3d.io.write_point_cloud(combined_path, combined_pc)
+        # # Option 1: Save combined point cloud
+        # combined_pc = valid_point_clouds[0]
+        # for pc in valid_point_clouds[1:]:
+        #     combined_pc += pc
+        # combined_path = os.path.join(base_dir, name_without_ext + "_combined.ply")
+        # o3d.io.write_point_cloud(combined_path, combined_pc)
         
         # # Option 2: Save individual organ point clouds
-        # for label, pc in organ_pc_collection.items():
+        # for organ_name, pc in organ_pc_collection.items():
         #     if pc is not None:
-        #         organ_name = label_classes.get(label, f"organ_{label}")
+        # #         organ_name = label_classes.get(label, f"organ_{label}")
         #         organ_path = os.path.join(base_dir, name_without_ext + f"_{organ_name}.ply")
         #         o3d.io.write_point_cloud(organ_path, pc)
-
+        print(organ_pc_collection)
     return organ_pc_collection, organ_bool_lap
