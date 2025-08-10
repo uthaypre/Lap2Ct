@@ -1,0 +1,7 @@
+ct: /mnt/d/projectsD/datasets/LAP2CT/ct
+laparoscopy: /mnt/d/projectsD/datasets/LAP2CT/laparoscopy
+nnunet_ct: /mnt/d/projectsD/datasets/nnUNet/nnUNet_raw/Dataset023_AbdomenAtlas1.1Mini/imagesTs
+nnunet_laparoscopy: /mnt/d/projectsD/datasets/nnUNet/nnUNet_raw/Dataset333_DSAD/imagesTs
+nnunet_ct_weights: /mnt/d/projectsD/datasets/nnUNet/nnUNet_results/Dataset023_AbdomenAtlas1.1Mini/nnUNetTrainer_8000epochs__nnUNetResEncUNetLPlans__3d_fullres/fold_all/checkpoint_best.pth
+nnunet_lap_weights: /mnt/d/projectsD/datasets/nnUNet/nnUNet_results/Dataset333_DSAD/nnUNetTrainer_8000epochs__nnUNetResEncUNetLPlans__2d/fold_all/checkpoint_final.pth
+
