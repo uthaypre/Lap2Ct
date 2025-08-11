@@ -12,7 +12,69 @@ from torchvision.transforms import Compose
 from tqdm import tqdm
 from models.DepthAnything.depth_anything.dpt import DepthAnything
 from models.DepthAnything.depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
+import logging
+import sys
+from pathlib import Path
 
+def setup_logger(log_level="INFO", log_file=False):
+    """
+    Set up logging configuration.
+    
+    Args:
+        log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_file (str): Optional log file path. If None, logs to console only.
+    
+    Returns:
+        logging.Logger: Configured logger instance
+    """
+    logger = logging.getLogger('Lap2Ct')
+    logger.setLevel(getattr(logging, log_level.upper()))
+    
+    # Clear existing handlers to avoid duplicates
+    logger.handlers.clear()
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(getattr(logging, log_level.upper()))
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler (optional)
+    if log_file:
+        # Create unique log file name with timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_log_file = Path(f"logs/lap2ct_log_{timestamp}.log")
+
+        file_handler = logging.FileHandler(unique_log_file)
+        file_handler.setLevel(getattr(logging, log_level.upper()))
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    
+    return logger
+
+def get_color_from_name(name, label_name, label_colors):
+    name_label = {n: l for l, n in label_name.items()}
+    return label_colors[name_label[name]] 
+
+def get_ball_marker(center, radius=5, n_points=2000, color=(1.0, 0.0, 0.0)):
+    # 1) make a small sphere mesh
+    mesh = o3d.geometry.TriangleMesh.create_sphere(radius=radius, resolution=20)
+    mesh.compute_vertex_normals()
+    mesh.paint_uniform_color(color)
+
+    # 2) sample mesh → point cloud
+    ball = mesh.sample_points_uniformly(number_of_points=n_points)
+
+    # 3) move to desired center
+    ball.translate(np.asarray(center), relative=True)
+    return ball
 def get_depthmap(img_path, outdir='./vis_depth', encoder='vitl', grayscale=False):
     """
     Run Depth Anything inference on images.
