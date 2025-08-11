@@ -1,23 +1,7 @@
-# import open3d as o3d
-# import SimpleITK as sitk
-# import numpy as np
-# from skimage import measure
-# import nibabel as nib
-# import logging
-# import os
 import argparse
-# import sys
-from pathlib import Path
-# import yaml
-# from easydict import EasyDict as edict
 from models.nnUNet.nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from models.nnUNet.nnunetv2.utilities.file_path_utilities import get_output_folder
-from batchgenerators.utilities.file_and_folder_operations import load_json, join, isfile, maybe_mkdir_p, isdir, subdirs, \
-    save_json
-# from torch import nn
-# # from torch._dynamo import OptimizedModule
-# from torch.nn.parallel import DistributedDataParallel
-# from tqdm import tqdm
+from batchgenerators.utilities.file_and_folder_operations import maybe_mkdir_p, isdir
 import torch
 
 def predict_nnunet(args):
