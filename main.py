@@ -107,6 +107,10 @@ def main():
     # Load input data
     Path(config.ct).mkdir(parents=True, exist_ok=True)
     Path(config.laparoscopy).mkdir(parents=True, exist_ok=True)
+    # TRANSPARENT material (alpha<1) → use a *Transparency* shader
+    mat_trans = o3d.visualization.rendering.MaterialRecord()
+    mat_trans.shader = "defaultLitTransparency"     # or "defaultLitTransparency"
+    mat_trans.base_color = [0.9, 0.9, 0.9, 0.5]      # 50% opacity
 
     try:
         logger.info("Processing started")
@@ -194,9 +198,9 @@ def main():
             ### 3. Rigid Registration ###
             logger.info(f"{frame.name}: Step 3: Starting rigid registration")
             # Iterate through found organs in laparoscopy
-            overlay = [ct_pcd_overlay]
+            overlay = [{"name": "ct_pcd",  "geometry": ct_pcd_overlay, "material": mat_trans}]
             registered_organs_count = 0
-            
+            overlayed_organs = []
             for organ_name, lap_organ in lap_organs_pcd.items():
                 if lap_organ is None:
                     logger.debug(f"{frame.name}: Skipping {organ_name} - no point cloud generated")
@@ -210,31 +214,43 @@ def main():
                     logger.info(f"{frame.name}: Rigid Registering {organ_name} to CT organ")
                     transformed_lap_organ, init_transformation, reg_results = rigid_reg(source=lap_organ, target=ct_organs_pcd[organ_name])
 
-                    if len(reg_results.correspondence_set) < 5:
-                        logger.warning(f"{frame.name}: Not enough correspondences for {organ_name} ({len(reg_results.correspondence_set)} found), skipping rigid registration")
+                    if len(reg_results.correspondence_set) > 5:
+                        logger.debug(f"{frame.name}: Rigid Registration successful with {len(reg_results.correspondence_set)} correspondences")
+                        logger.debug(f"{frame.name}: Registration fitness: {reg_results.fitness:.4f}")
+                        logger.debug(f"{frame.name}: Registration RMSE: {reg_results.inlier_rmse:.4f}")
+                        
+                        print("this is the transformation matrix:", reg_results.transformation)
+                        print("this is the init transformation matrix:", init_transformation)
+                        print("this is the local camera pose:", local_camera_pose)
+                        local_camera_poses.append(reg_results.transformation @ init_transformation @ local_camera_pose)
+
+                        logger.info(f"{frame.name}: Rigid Registered {organ_name} successfully")
+                        
+                        ### 4. Non-Rigid Registration ###
+                        logger.info(f"{frame.name}: Step 4: Starting non-rigid registration")
+                        registered_lap_organ = oareg(transformed_lap_organ, ct_organs_pcd[organ_name])
+                        current_color = get_color_from_name(organ_name, seg_config.lap_organ_classes, seg_config.lap_organ_colors)
+                        logger.info(f"{frame.name}: Non-rigid registration completed for {organ_name}")
+                        logger.debug(f"{frame.name}: Applying color to registered organ: {organ_name}")
+                        registered_organs_count += 1
+                        registered_lap_organ.paint_uniform_color(current_color)
+                        overlay.append(registered_lap_organ)
+                        overlay.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(np.array([1, 1, 1])))
+                        overlayed_organs.append(organ_name)
+                    else:
+                        logger.warning(f"{frame.name}: Rigid Registration failed for {organ_name} - not enough correspondences -> skipping rigid registration")
                         continue
-
-                    logger.debug(f"{frame.name}: Rigid Registration successful with {len(reg_results.correspondence_set)} correspondences")
-                    logger.debug(f"{frame.name}: Registration fitness: {reg_results.fitness:.4f}")
-                    logger.debug(f"{frame.name}: Registration RMSE: {reg_results.inlier_rmse:.4f}")
-                    
-                    print("this is the transformation matrix:", reg_results.transformation)
-                    print("this is the init transformation matrix:", init_transformation)
-                    print("this is the local camera pose:", local_camera_pose)
-                    local_camera_poses.append(reg_results.transformation @ init_transformation @ local_camera_pose)
-
-                    logger.info(f"{frame.name}: Rigid Registered {organ_name} successfully")
-                    
-                    ### 4. Non-Rigid Registration ###
-                    logger.info(f"{frame.name}: Step 4: Starting non-rigid registration")
-                    registered_lap_organ = oareg(transformed_lap_organ, ct_organs_pcd[organ_name])
-                    current_color = get_color_from_name(organ_name, seg_config.lap_organ_classes, seg_config.lap_organ_colors)
-                    logger.info(f"{frame.name}: Non-rigid registration completed for {organ_name}")
-                    logger.debug(f"{frame.name}: Applying color to registered organ: {organ_name}")
-                    registered_organs_count += 1
-                    registered_lap_organ.paint_uniform_color(current_color)
-                    overlay.append(registered_lap_organ)
-                    overlay.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(np.array([0.75, 0.75, 0.75])))
+                        ### 4. Non-Rigid Registration ###
+                        logger.info(f"{frame.name}: Step 4: Starting non-rigid registration")
+                        registered_lap_organ = oareg(lap_organ, ct_organs_pcd[organ_name])
+                        current_color = get_color_from_name(organ_name, seg_config.lap_organ_classes, seg_config.lap_organ_colors)
+                        logger.info(f"{frame.name}: Non-rigid registration completed for {organ_name}")
+                        logger.debug(f"{frame.name}: Applying color to registered organ: {organ_name}")
+                        registered_organs_count += 1
+                        registered_lap_organ.paint_uniform_color(current_color)
+                        overlay.append(registered_lap_organ)
+                        overlay.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(np.array([1, 1, 1])))
+                        
                 else:
                     logger.warning(f"{frame.name}: {organ_name} not found in CT organs, skipping registration")
 
@@ -247,22 +263,24 @@ def main():
                 logger.info(f"{frame.name}: Camera pose estimated from {len(local_camera_poses)} organs (averaged)")
                 camera_marker = get_ball_marker(camera_pose[:3])
                 camera_pose_tracker.append(camera_pose[:3])
+                logger.info(f"Camera pose for frame {frame.name}: {camera_pose_tracker[-1]}")
+                logger.info(f"Displaying visualization for frame {frame.name}")
+                o3d.visualization.draw(overlay + [camera_marker], show_skybox=False)
+                o3d.io.write_point_cloud(f"frame_{frame.name}_{"_".join(overlayed_organs)}.ply", overlay + [camera_marker])
             elif len(local_camera_poses) == 1:
                 logger.info(f"{frame.name}: Camera pose estimated from single organ")
                 camera_marker = get_ball_marker(local_camera_poses[0][:3])
                 camera_pose_tracker.append(local_camera_poses[0][:3])
+                logger.info(f"Camera pose for frame {frame.name}: {camera_pose_tracker[-1]}")
+                logger.info(f"Displaying visualization for frame {frame.name}")
+                o3d.visualization.draw(overlay + [camera_marker], show_skybox=False)
+                o3d.io.write_point_cloud(f"frame_{frame.name}_{"_".join(overlayed_organs)}.ply", overlay + [camera_marker])
             else:
-                logger.warning(f"{frame.name}: No camera pose could be estimated - no successful registrations")
-                continue
-            
-            logger.info(f"Camera pose for frame {frame.name}: {camera_pose_tracker[-1]}")
+                logger.warning(f"{frame.name}: No camera pose could be estimated")
+                # logger.info(f"Displaying visualization for frame {frame.name}")
+                # o3d.visualization.draw(overlay, show_skybox=False)         
 
-            # Visualize the registered organs
-            logger.info(f"Displaying visualization for frame {frame.name}")
-            o3d.visualization.draw_geometries(overlay + [camera_marker], window_name=f"Laparoscopy Frame {frame.name}")
-                
         logger.info(f"All frames processed successfully. Total camera poses tracked: {len(camera_pose_tracker)}")
-        logger.info("Processing completed successfully")
         return 0
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}", exc_info=True)
