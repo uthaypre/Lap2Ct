@@ -4,6 +4,7 @@ from skimage import measure
 import nibabel as nib
 import logging
 from pathlib import Path
+import pickle
 
 def get_3dct(ct_path, label_classes=None, label_colors=None):
     ct_mask = nib.load(ct_path).get_fdata()
@@ -31,7 +32,6 @@ def get_3dct(ct_path, label_classes=None, label_colors=None):
 
     # Visualize the organ meshes
     # o3d.visualization.draw_geometries([organ_collection[organ] for organ in organ_collection])
-
     ## save point cloud
     # o3d.io.write_triangle_mesh(ct_path.parent / (Path(ct_path.stem).stem + ".obj"), [organ_collection[organ] for organ in organ_collection])  # Save the liver mesh as an example
     return organ_collection, organ_bool # both have length = 25
