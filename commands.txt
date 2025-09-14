@@ -1,0 +1,21 @@
+python run.py \
+  --encoder vitl \
+  --img-path /mnt/d/projectsD/datasets/nnUNet/nnUNet_raw/Dataset333_DSAD/imagesTs/image_52633_0000.png --outdir /mnt/d/projectsD/datasets/nnUNet/nnUNet_raw/Dataset333_DSAD/imagesTs/ \
+
+python depth_to_pointcloud.py \
+  --encoder vitl \
+  --load-from checkpoints/depth_anything_v2_metric_hypersim_vitl.pth \
+  --max-depth 20 \
+  --img-path /mnt/d/projectsD/datasets/nnUNet/nnUNet_raw/Dataset333_DSAD/imagesTs/image_21504_0000.png --outdir /mnt/d/projectsD/datasets/nnUNet/nnUNet_raw/Dataset333_DSAD/imagesTs/
+
+
+
+
+
+
+python -m generate_keyframe_dataset /mnt/d/projectsD/datasets/2019-selected_4-6/dataset_4/keyframe_5 --out_dir /mnt/d/projectsD/datasets/depth_val_test --depth
+
+
+
+
+python depth_eval.py --gt /mnt/d/projectsD/datasets/depth_val_test/0000001236_gt.png --pred /mnt/d/projectsD/datasets/depth_val_test/DepthPro/Left_Image_depth.png/Left_Image.npz

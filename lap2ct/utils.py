@@ -4,6 +4,7 @@ from skimage import measure
 import nibabel as nib
 import open3d as o3d
 import cv2
+import math
 import copy
 import torch
 import os
@@ -13,9 +14,12 @@ from tqdm import tqdm
 from models.DepthAnything.depth_anything.dpt import DepthAnything
 from models.DepthAnything.depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
 import logging
+import matplotlib
 import sys
 from pathlib import Path
-
+# from models.DepthAnythingV2.metric_depth.depth_anything_v2.dpt import DepthAnythingV2
+from models.DepthAnythingV2.depth_anything_v2.dpt import DepthAnythingV2
+from scipy.ndimage import binary_fill_holes
 def setup_logger(log_level="INFO", log_file=False):
     """
     Set up logging configuration.
@@ -28,34 +32,35 @@ def setup_logger(log_level="INFO", log_file=False):
         logging.Logger: Configured logger instance
     """
     logger = logging.getLogger('Lap2Ct')
-    logger.setLevel(getattr(logging, log_level.upper()))
     
-    # Clear existing handlers to avoid duplicates
-    logger.handlers.clear()
-    
-    # Create formatter
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(getattr(logging, log_level.upper()))
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # File handler (optional)
-    if log_file:
-        # Create unique log file name with timestamp
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        unique_log_file = Path(f"logs/lap2ct_log_{timestamp}.log")
+    # Only configure if logger doesn't already have handlers
+    if not logger.handlers:
+        logger.setLevel(getattr(logging, log_level.upper()))
+        
+        # Create formatter
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(getattr(logging, log_level.upper()))
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        # File handler (optional)
+        if log_file:
+            # Create unique log file name with timestamp
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_log_file = Path(f"logs/lap2ct_log_{timestamp}.log")
+            unique_log_file.parent.mkdir(exist_ok=True)
 
-        file_handler = logging.FileHandler(unique_log_file)
-        file_handler.setLevel(getattr(logging, log_level.upper()))
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+            file_handler = logging.FileHandler(unique_log_file, mode='a')  # Append mode
+            file_handler.setLevel(getattr(logging, log_level.upper()))
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
     
     return logger
 
@@ -157,7 +162,45 @@ def get_depthmap(img_path, outdir='./vis_depth', encoder='vitl', grayscale=False
 
     return depth_result
 
+def get_metric_depth(org_path):
+    # model_configs = {
+    #     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+    #     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+    #     'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]}
+    # }
+    model_configs = {
+    'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+    'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+    'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+    }
+    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    encoder = 'vitl' # or 'vits', 'vitb'
+    # dataset = 'hypersim' # 'hypersim' for indoor model, 'vkitti' for outdoor model
+    # max_depth = 1 # 20 for indoor model, 80 for outdoor model
 
+    # model = DepthAnythingV2(**{**model_configs[encoder], 'max_depth': max_depth})
+    # model.load_state_dict(torch.load(f'models/DepthAnythingV2/metric_depth/checkpoints/depth_anything_v2_metric_{dataset}_{encoder}.pth', map_location='cpu'))
+    model = DepthAnythingV2(**model_configs[encoder])
+    model.load_state_dict(torch.load(f'models/DepthAnythingV2/checkpoints/depth_anything_v2_{encoder}.pth', map_location='cpu'))
+    model = model.to(device).eval()
+
+    raw_img = cv2.imread(str(org_path))
+    depth = model.infer_image(raw_img) # HxW depth map in meters in numpy
+    h, w = raw_img.shape[:2]
+    
+    # # Convert numpy depth to tensor for interpolation
+    # depth_tensor = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
+    # depth_tensor = F.interpolate(depth_tensor, (h, w), mode='bilinear', align_corners=False)
+    # depth = depth_tensor.squeeze().numpy()  # Remove dims and convert back to numpy
+    
+    depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
+    depth = depth.astype(np.uint8)
+    cmap = matplotlib.colormaps.get_cmap('magma') # Spectral_r
+    depth = (cmap(depth)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
+    # cv2.imwrite(os.path.join('/mnt/d/projectsD/datasets/LAP2CT/laparoscopy/', org_path.stem + '_depth.png'), depth * 255.0 / max_depth)  # Save depth map as PNG
+    cv2.imwrite(os.path.join('/mnt/d/projectsD/datasets/LAP2CT/laparoscopy/', org_path.stem + '_depth.png'), depth)  # Save depth map as PNG
+    return depth
 def get_overlay(organ_meshes):
     """
     Create an overlay point cloud from the organ meshes.
@@ -171,12 +214,12 @@ def get_overlay(organ_meshes):
     overlay_pcd = o3d.geometry.PointCloud()
     for organ, mesh in organ_meshes.items():
         single_mesh = copy.deepcopy(mesh)  # Clone the mesh to avoid modifying the original
-        single_mesh.paint_uniform_color(np.array([0.9, 0.9, 0.9]))  # Set ct pc color to gray
+        # single_mesh.paint_uniform_color(np.array([0.9, 0.9, 0.9]))  # Set ct pc color to gray
         single_pcd = single_mesh.sample_points_uniformly(number_of_points=10000)
         overlay_pcd += single_pcd
 
     return overlay_pcd
-def get_3dlap(lap_path, label_classes=None, label_colors=None):
+def get_3dlap(lap_path, label_classes=None, label_colors=None, logger=None):
     # Load the segmentation mask
     lap_mask = cv2.imread(lap_path)
 
@@ -195,20 +238,28 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None):
         raise FileNotFoundError(f"Could not read depth file: {depth_path}")
     depth_image = cv2.cvtColor(depth_image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
     depth_float = depth_image.astype(np.float32)
-
+    logger.info(f"depth values org: {min(depth_float.flatten())} - {max(depth_float.flatten())}")
+    # max_depth = 300
+    # depth_scale = max_depth / (depth_float.max() - depth_float.min())  # Scale depth values to [0, 300]
+    # depth_float = (depth_float) * depth_scale
+    logger.info(f"depth values scaled: {min(depth_float.flatten())} - {max(depth_float.flatten())}")
     colored_mask = np.zeros((lap_mask.shape[0], lap_mask.shape[1], 3))
     for label, color in label_colors.items():
         if int(label) == 0:
             continue  # Skip background
         colored_mask[lap_mask == int(label)] = color
-    colored_mask = (colored_mask * 255).astype(np.uint16) 
+    colored_mask = (colored_mask * 255).astype(np.uint8) 
+    cv2.imwrite(os.path.join(base_dir, name_without_ext + "_colored_mask.png"), colored_mask)
+    logger.debug(f"Colored mask contains these colors: {np.unique(colored_mask.reshape(-1, 3), axis=0)}")
 
     width, height = depth_float.shape[1], depth_float.shape[0]
-    fov = 55.0  # Field of view in degrees
+    fov = 70.0  # Field of view in degrees
     fx = 0.5 * width / np.tan(0.5 * np.deg2rad(fov))
     fy = 0.5 * height / np.tan(0.5 * np.deg2rad(fov))
     cx = width / 2.0
     cy = height / 2.0
+    logger.debug(f"Camera intrinsic parameters: fx={fx}, fy={fy}, cx={cx}, cy={cy}, fov={fov}, width={width}, height={height}")
+    logger.debug(f"Depth image shape: {depth_float.shape}, Mask shape: {lap_mask.shape}")
 
     # Filter out each organ point cloud
     organ_pc_collection = {}
@@ -216,6 +267,8 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None):
     for label, organ in label_classes.items():
         print(f"Processing organ: {organ} with label: {label} and color: {label_colors[label]}")
         organ_mask = (lap_mask == int(label)).astype(np.uint8)  # Create a mask for the specific organ
+        # postprocess
+        organ_mask = mask_postprocessing(organ_mask)
         # Check if organ exists in the data
         if np.sum(organ_mask) == 0:
             print(f"Skipping {organ} (label {label}) - not present in this scan")
@@ -231,20 +284,37 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None):
         single_rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
                         color=o3d.geometry.Image(single_colored_mask),
                         depth=o3d.geometry.Image(organ_depth),
-                        depth_trunc=1000.0,
+                        # depth_scale=0.10,  # No scaling needed since depth is already in millimeters
+                        # depth_trunc=1000.0,
                         convert_rgb_to_intensity=False)
         single_seg_point_cloud = o3d.geometry.PointCloud.create_from_rgbd_image(single_rgbd_image,
                         intrinsic=o3d.camera.PinholeCameraIntrinsic(
                         width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy))
+        
+        # Apply coordinate system transformation to match medical imaging conventions
+        # Open3D creates point clouds with Y pointing down (image coords)
+        # We want Y pointing up for proper 3D visualization and registration
+        # flip_transform = np.array([
+        #     [1,  0,  0, 0],
+        #     [0,  0, -1, 0],  # Flip Y-axis
+        #     [0,  1,  0, 0],
+        #     [0,  0,  0, 1]
+        # ])
+        single_seg_point_cloud.transform([[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]])
+        
         # Add the organ point cloud to the collection
         organ_pc_collection[organ] = single_seg_point_cloud
+        # logger.info(f"points: {np.asarray(single_seg_point_cloud.points[:30])}")
 
-    # # Visualize the point clouds for each organ
-    # try:
-    #     o3d.visualization.draw_geometries([pc for pc in organ_pc_collection.values() if pc is not None], mesh_show_back_face=True)
-    # except Exception as e:
-    #     print(f"Error visualizing point clouds: {e}")
-    #     return organ_pc_collection, organ_bool_lap
+
+    
+    # Visualize the point clouds for each organ
+    try:
+        # o3d.visualization.draw([pc for organ_name, pc in organ_pc_collection.items() if pc is not None and organ_name != "background"]+[o3d.geometry.TriangleMesh.create_coordinate_frame()])
+        o3d.visualization.draw([pc for organ_name, pc in organ_pc_collection.items() if pc is not None and organ_name != "background"])
+    except Exception as e:
+        print(f"Error visualizing point clouds: {e}")
+        return organ_pc_collection, organ_bool_lap
     
     # Save individual organ point clouds or combine them
     valid_point_clouds = [pc for pc in organ_pc_collection.values() if pc is not None]
@@ -270,7 +340,14 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None):
         print(organ_pc_collection)
     return organ_pc_collection, organ_bool_lap
 def get_3dct(ct_path, label_classes=None, label_colors=None):
-    ct_mask = nib.load(ct_path).get_fdata()
+    nii = nib.load(ct_path)
+    ct_mask = nii.get_fdata()
+    A = nii.affine                       # 4x4
+    ax = nib.aff2axcodes(A)              # e.g. ('L','P','S') or ('R','A','S')
+    print(f"Image axes: {ax}  (affine maps voxel->scanner mm)")
+
+    # # Optional LPS->RAS flip (scanner space)
+    # LPS_to_RAS = np.diag([-1, -1, 1, 1])  # flips X,Y
 
     organ_collection = {}
     organ_bool = []
@@ -283,18 +360,109 @@ def get_3dct(ct_path, label_classes=None, label_colors=None):
             organ_collection[organ] = None
             continue
         organ_bool.append(True)
-        verts, faces, _, _ = measure.marching_cubes(organ_mask, level=0.5)  # Extract the mesh for the organ
+        verts_xyz, faces, _, _ = measure.marching_cubes(organ_mask, level=0.5)  # Extract the mesh for the organ
+        
+        # verts_xyz = verts_zyx[:, [2, 1, 0]]
+        # ones = np.ones((verts_xyz.shape[0], 1), dtype=np.float64)
+        # V_h = np.hstack([verts_xyz, ones])                 # Nx4
+        # V_mm = (A @ V_h.T).T[:, :3]                        # Nx3 in scanner mm
+        # verts_xyz = A[:3, :3] @ verts_xyz.T + A[:3, -1]  # Convert to scanner mm
 
+        # # 5) Optional: convert scanner LPS -> RAS
+        # if ax == ('L', 'P', 'S'):
+        #     V_mm_h = np.hstack([V_mm, np.ones((V_mm.shape[0], 1))])
+        #     V_mm = (LPS_to_RAS @ V_mm_h.T).T[:, :3]
+        V_mm = verts_xyz
+        
         organ_mesh = o3d.geometry.TriangleMesh()
-        organ_mesh.vertices = o3d.utility.Vector3dVector(verts)
+        organ_mesh.vertices = o3d.utility.Vector3dVector(V_mm)
         organ_mesh.triangles = o3d.utility.Vector3iVector(faces)
         organ_mesh.compute_vertex_normals()
         organ_mesh.paint_uniform_color(label_colors[label])  # Assign a random color to each organ
         organ_collection[organ] = organ_mesh  # Store the organ name and mesh
+        cs_ct = organ_mesh.create_coordinate_frame(size=100)
         print(f"Organ: {organ}, label: {label}")
 
     # Visualize the organ meshes
-    # o3d.visualization.draw_geometries([organ_collection[organ] for organ in organ_collection])
+    o3d.visualization.draw_geometries([organ_collection[organ] for organ in organ_collection]+[cs_ct])
     ## save point cloud
     # o3d.io.write_triangle_mesh(ct_path.parent / (Path(ct_path.stem).stem + ".obj"), [organ_collection[organ] for organ in organ_collection])  # Save the liver mesh as an example
     return organ_collection, organ_bool # both have length = 25
+
+def make_fov_box(fov_x_deg, fov_y_deg, near=0.01, far=0.2):
+    # Near/far planes in meters
+    fov_x = math.radians(fov_x_deg)
+    fov_y = math.radians(fov_y_deg)
+
+    half_w_near = math.tan(fov_x/2) * near
+    half_h_near = math.tan(fov_y/2) * near
+    half_w_far  = math.tan(fov_x/2) * far
+    half_h_far  = math.tan(fov_y/2) * far
+
+    # Vertices of truncated pyramid (frustum)
+    verts = np.array([
+        [-half_w_near, -half_h_near, near],
+        [ half_w_near, -half_h_near, near],
+        [ half_w_near,  half_h_near, near],
+        [-half_w_near,  half_h_near, near],
+        [-half_w_far,  -half_h_far,  far],
+        [ half_w_far,  -half_h_far,  far],
+        [ half_w_far,   half_h_far,  far],
+        [-half_w_far,   half_h_far,  far]
+    ])
+    
+    lines = [
+        [0,1],[1,2],[2,3],[3,0], # near
+        [4,5],[5,6],[6,7],[7,4], # far
+        [0,4],[1,5],[2,6],[3,7]  # sides
+    ]
+    
+    frustum = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(verts),
+        lines=o3d.utility.Vector2iVector(lines)
+    )
+    return frustum
+
+def smooth_edges(mask2d: np.ndarray, ksize: int = 5) -> np.ndarray:
+    """
+    mask2d: 2D binary array (0/1 or 0/255)
+    ksize : odd kernel size for uniform smoothing
+    """
+    m = (mask2d > 0).astype(np.float32)
+    m = cv2.blur(m, (ksize, ksize))         # conv2D with uniform kernel
+    return (m >= 0.5).astype(np.uint8)      # threshold at 0.5 (returns {0,1})
+
+
+def mask_postprocessing(mask, erode_ksize=3,
+                            dilate_ksize=3,
+                            smooth_ksize=5):
+    # clean up the mask
+
+    erode_k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_ksize, erode_ksize))
+    dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_ksize, dilate_ksize))
+    bin_ = (mask > 0).astype(np.uint8)
+
+    # 2) erode
+    eroded = cv2.erode(bin_, erode_k, iterations=1)
+
+    # 3) connected components 
+    num, labels = cv2.connectedComponents(eroded, connectivity=8)
+
+    if num > 1:
+        # 4) histogram of component sizes (ignore 0 = background)
+        areas = np.bincount(labels.ravel())[1:]  # length num-1
+        keep_id = 1 + np.argmax(areas)          # label id to keep (largest)
+        # 5) remove all labels except the largest region
+        kept = (labels == keep_id).astype(np.uint8)
+    else:
+        kept = eroded  # nothing to choose, keep as-is
+
+    # 6) dilate2D
+    dilated = cv2.dilate(kept, dilate_k, iterations=1)
+
+    # 7) fillholes (imfill)
+    filled = binary_fill_holes(dilated.astype(bool)).astype(np.uint8)
+
+    # 8) Smoothedges
+    smooth = smooth_edges(filled, ksize=smooth_ksize)
+    return smooth

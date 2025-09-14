@@ -6,12 +6,13 @@ import copy
 from pathlib import Path
 import yaml
 from easydict import EasyDict as edict
+import cv2
 
 from lap2ct.nnunet import predict_nnunet, create_nnunet_args
-from lap2ct.utils import get_3dlap, get_3dct, get_overlay, get_depthmap, setup_logger, get_ball_marker, get_color_from_name
+from lap2ct.utils import get_3dlap, get_3dct, get_overlay, get_depthmap, setup_logger, get_ball_marker, get_color_from_name, get_metric_depth, make_fov_box
 from lap2ct.registration import oareg, rigid_reg
 
-def main():
+def main(seed=42, voxel_size=1.817, logger=None):
     # Load configurations
     config_pth = 'configs/data.yaml'
     seg_config_pth = 'configs/organ_segmentation.yaml'
@@ -22,16 +23,18 @@ def main():
         seg_config = yaml.safe_load(f)
     seg_config = edict(seg_config)
 
-    # Setup logger
-    logger = setup_logger(log_level=config.log_level, log_file=config.save_log)
+    # Setup logger only if not provided
+    if logger is None:
+        logger = setup_logger(log_level=config.log_level, log_file=config.save_log)
 
     # Generate transparency (alpha<1)
     mat_trans = o3d.visualization.rendering.MaterialRecord()
     mat_trans.shader = "defaultLitTransparency"
     mat_trans.base_color = [0.9, 0.9, 0.9, 0.5]
-
+    flip_transform = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]])
     try:
-        logger.info("Processing started")
+        logger.info("Processing started (with seed: %d and voxel_size: %f)", seed, voxel_size)
+        # logger.info("This experiment runs with automated voxel sizes and fast global registration")
         logger.info("Starting preoperative processing")
         logger.info("Step 1: Generating 3D CT Model")
         
@@ -62,6 +65,7 @@ def main():
         ct_organs_pcd = {organ: mesh.sample_points_uniformly(number_of_points=10000) for organ, mesh in ct_organs_mesh.items() if mesh is not None}
         logger.info("Starting intraoperative processing")
         # Loop through laparoscopy video frames
+        
         laparoscopy_frames = list(Path(config.nnunet_laparoscopy).glob("*.png"))
         logger.info(f"Found {len(laparoscopy_frames)} laparoscopy frames to process")
         
@@ -74,31 +78,34 @@ def main():
         for i, frame in enumerate(laparoscopy_frames, 1):
             logger.info(f"Processing frame {i}/{len(laparoscopy_frames)}: {frame.name}")
             # Create args for Laparoscopy prediction
-            laparoscopy_args = create_nnunet_args(
-                input_path=[[str(frame)]],
-                output_path=config.laparoscopy,
-                dataset_id=333,
-                config='2d',
-                fold='all',
-                save_probabilities=True,
-                model='nnUNetResEncUNetLPlans',
-                trainer='nnUNetTrainer_8000epochs',
-                checkpoint=config.nnunet_lap_weights)   
+            # laparoscopy_args = create_nnunet_args(
+            #     input_path=[[str(frame)]],
+            #     output_path=config.laparoscopy,
+            #     dataset_id=333,
+            #     config='2d',
+            #     fold='all',
+            #     save_probabilities=True,
+            #     model='nnUNetResEncUNetLPlans',
+            #     trainer='nnUNetTrainer_8000epochs',
+            #     checkpoint=config.nnunet_lap_weights)   
 
-            logger.info(f"{frame.name}: Step 2: 3D Laparoscopy Reconstruction")
-            logger.info(f"{frame.name}: Running nnUNet prediction for Laparoscopy data")
-            predict_nnunet(laparoscopy_args)
-            logger.info(f"{frame.name}: Laparoscopy prediction completed successfully")
+            # logger.info(f"{frame.name}: Step 2: 3D Laparoscopy Reconstruction")
+            # logger.info(f"{frame.name}: Running nnUNet prediction for Laparoscopy data")
+            # # predict_nnunet(laparoscopy_args)
+            # logger.info(f"{frame.name}: Laparoscopy prediction completed successfully")
 
-            logger.info(f"{frame.name}: Running Depth Anything for Laparoscopy frame")
-            lap_depth_map = get_depthmap(frame, outdir=config.laparoscopy, encoder='vitl', grayscale=False)
-            logger.info(f"{frame.name}: Depth map generated successfully")
+            # logger.info(f"{frame.name}: Running Depth Anything for Laparoscopy frame")
+            # # lap_depth_map = get_depthmap(frame, outdir=config.laparoscopy, encoder='vitl', grayscale=False)
+            # lap_depth_map = get_metric_depth(org_path=frame)
+            # logger.info(f"{frame.name}: Depth map generated successfully")
             mask_base = frame.stem.rsplit("_", 1)[0]  # remove last underscore chunk
             mask_path = os.path.join(config.laparoscopy, (mask_base + frame.suffix))
             logger.debug(f"{frame.name}: Mask path: {mask_path}")
 
-            lap_organs_pcd, lap_organs_bool = get_3dlap(mask_path, seg_config.lap_organ_classes, seg_config.lap_organ_colors)
+            lap_organs_pcd, lap_organs_bool = get_3dlap(mask_path, seg_config.lap_organ_classes, seg_config.lap_organ_colors, logger=logger)
             logger.info(f"{frame.name}: Generated laparoscopy point clouds for {len([pc for pc in lap_organs_pcd.values() if pc is not None])} organs")
+            org_mask = cv2.imread(mask_path)  # loads pixels
+            h, w = org_mask.shape[:2]
             local_camera_pose = np.array([0, 0, 0, 1])
             local_camera_poses = []
 
@@ -120,9 +127,9 @@ def main():
                 logger.info(f"{frame.name}: Found corresponding CT organ for {organ_name}")
                 # Perform rigid registration
                 logger.info(f"{frame.name}: Rigid Registering {organ_name} to CT organ")
-                transformed_lap_organ, init_transformation, reg_results = rigid_reg(source=lap_organ, target=ct_organs_pcd[organ_name])
+                transformed_lap_organ, init_transformation, reg_results = rigid_reg(source=lap_organ, target=ct_organs_pcd[organ_name], voxel_size=voxel_size, seed=seed, logger=logger)
 
-                if len(reg_results.correspondence_set) < 5:
+                if transformed_lap_organ is None or len(reg_results.correspondence_set) < 5:
                     logger.warning(f"{frame.name}: Rigid Registration failed for {organ_name} - not enough correspondences -> skipping registration")
                     continue
                 else:
@@ -132,8 +139,9 @@ def main():
                                  f"{frame.name}: Initial transformation matrix: {init_transformation}\n"
                                  f"{frame.name}: Final transformation matrix: {reg_results.transformation}\n"
                                  f"{frame.name}: Local camera pose: {local_camera_pose}")
-                    
-                    local_camera_poses.append(reg_results.transformation @ init_transformation @ local_camera_pose)
+
+                    local_camera_poses.append(np.dot(reg_results.transformation, np.dot(init_transformation, local_camera_pose)))
+                    # local_camera_poses.append(np.dot(reg_results.transformation,  local_camera_pose))
                     logger.info(f"{frame.name}: Rigid Registered {organ_name} successfully")
                     
                     logger.info(f"{frame.name}: Step 4: Starting non-rigid registration")
@@ -144,7 +152,7 @@ def main():
                     registered_organs_count += 1
                     registered_lap_organ.paint_uniform_color(current_color)
                     overlay.append(registered_lap_organ)
-                    overlay.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(np.array([1, 1, 1])))
+                    overlay.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(np.array([0, 0, 0])))
                     overlayed_organs.append(organ_name)
 
             logger.info(f"{frame.name}: Registration completed for frame {frame.name}. Successfully registered {registered_organs_count} organs")
@@ -164,9 +172,11 @@ def main():
             camera_marker = get_ball_marker(camera_pose)
             camera_pose_tracker.append(camera_pose)
             o3d.visualization.draw(overlay + [camera_marker], show_skybox=False)
-            organ_list_named = "_".join(overlayed_organs)
+            # o3d.visualization.draw(overlay[1:] + [camera_marker], show_skybox=False)
+            logger.info(f"{frame.name}: Second overlay consists of {overlay[1:]} and {camera_marker}")
+            # organ_list_named = "_".join(overlayed_organs)
             # o3d.io.write_point_cloud(f"frame_{frame.name}_{organ_list_named}.ply", sum(overlay, camera_marker))
-        logger.info(f"All frames processed successfully. Total camera poses tracked: {len(camera_pose_tracker)}")
+        logger.info(f"All frames processed successfully (voxel_size={voxel_size}). Total camera poses tracked: {len(camera_pose_tracker)}")
         return 0
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}", exc_info=True)
