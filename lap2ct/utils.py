@@ -155,9 +155,10 @@ def get_depthmap(img_path, outdir='./vis_depth', encoder='vitl', grayscale=False
         if grayscale:
             depth_for_save = np.repeat(depth_result[..., np.newaxis], 3, axis=-1)
         else:
-            depth_for_save = cv2.applyColorMap(depth_result, cv2.COLORMAP_INFERNO)
+            depth_for_save = cv2.applyColorMap(depth_result, cv2.COLORMAP_MAGMA)
         
         filename_base = os.path.basename(filename)
+        print(f"Saving depth map to {os.path.join(outdir, filename_base[:filename_base.rfind('.')] + '_depth.png')}")
         cv2.imwrite(os.path.join(outdir, filename_base[:filename_base.rfind('.')] + '_depth.png'), depth_for_save)
 
     return depth_result
@@ -222,9 +223,8 @@ def get_overlay(organ_meshes):
 def get_3dlap(lap_path, label_classes=None, label_colors=None, logger=None):
     # Load the segmentation mask
     lap_mask = cv2.imread(lap_path)
-
     lap_mask = cv2.cvtColor(lap_mask, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
-    
+
     # Construct depth image path and load it
     base_dir = os.path.dirname(lap_path)
     filename = os.path.basename(lap_path)
@@ -239,17 +239,26 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None, logger=None):
     depth_image = cv2.cvtColor(depth_image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
     depth_float = depth_image.astype(np.float32)
     logger.info(f"depth values org: {min(depth_float.flatten())} - {max(depth_float.flatten())}")
+
+    # gt
+    gt = cv2.imread(f"/mnt/c/Users/uthaypre/OneDrive - ZHAW/Master/Masterarbeit/data/labelsTs_333/{name_without_ext}.png")
+    gt = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
     # max_depth = 300
     # depth_scale = max_depth / (depth_float.max() - depth_float.min())  # Scale depth values to [0, 300]
     # depth_float = (depth_float) * depth_scale
     logger.info(f"depth values scaled: {min(depth_float.flatten())} - {max(depth_float.flatten())}")
     colored_mask = np.zeros((lap_mask.shape[0], lap_mask.shape[1], 3))
+    colored_gt = np.zeros((gt.shape[0], gt.shape[1], 3))
     for label, color in label_colors.items():
         if int(label) == 0:
             continue  # Skip background
         colored_mask[lap_mask == int(label)] = color
+        colored_gt[gt == int(label)] = color
     colored_mask = (colored_mask * 255).astype(np.uint8) 
-    cv2.imwrite(os.path.join(base_dir, name_without_ext + "_colored_mask.png"), colored_mask)
+    colored_gt = (colored_gt * 255).astype(np.uint8)
+    print(f"Saving colored mask to: {os.path.join(base_dir, name_without_ext + '_colored_mask.png')}")
+    cv2.imwrite(os.path.join(base_dir, name_without_ext + "_colored_mask.png"), colored_mask[:, :, ::-1])  # Save as BGR
+    cv2.imwrite(os.path.join(base_dir, name_without_ext + "_colored_gt.png"), colored_gt[:, :, ::-1])  # Save as BGR
     logger.debug(f"Colored mask contains these colors: {np.unique(colored_mask.reshape(-1, 3), axis=0)}")
 
     width, height = depth_float.shape[1], depth_float.shape[0]
@@ -264,11 +273,12 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None, logger=None):
     # Filter out each organ point cloud
     organ_pc_collection = {}
     organ_bool_lap = []
+    postprocessing_collection = {}
     for label, organ in label_classes.items():
         print(f"Processing organ: {organ} with label: {label} and color: {label_colors[label]}")
-        organ_mask = (lap_mask == int(label)).astype(np.uint8)  # Create a mask for the specific organ
+        organ_raw_mask = (lap_mask == int(label)).astype(np.uint8)  # Create a mask for the specific organ
         # postprocess
-        organ_mask = mask_postprocessing(organ_mask)
+        organ_mask = mask_postprocessing(organ_raw_mask, label, lap_path, label_colors)
         # Check if organ exists in the data
         if np.sum(organ_mask) == 0:
             print(f"Skipping {organ} (label {label}) - not present in this scan")
@@ -276,7 +286,10 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None, logger=None):
             # organ_pc_collection[organ] = None
             continue
         organ_bool_lap.append(True)
-
+        # postprocessing_collection[organ] = [organ_raw_mask, organ_mask]
+        cv2.imwrite(os.path.join(os.path.dirname(lap_path), f'{name_without_ext}_postprocessing_.jpg'), cv2.hconcat([organ_raw_mask, organ_mask]))
+        print(np.unique(organ_mask))
+        cv2.imwrite(os.path.join(base_dir, name_without_ext + "_POST_pp.png"), organ_mask)  # Save as BGR
         single_colored_mask = np.zeros((organ_mask.shape[0], organ_mask.shape[1], 3))
         single_colored_mask[organ_mask == 1] = label_colors[label]  # Assign color to the organ mask
         single_colored_mask = (single_colored_mask * 255).astype(np.uint8)
@@ -308,10 +321,10 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None, logger=None):
 
 
     
-    # Visualize the point clouds for each organ
+    # # # Visualize the point clouds for each organ
     try:
         # o3d.visualization.draw([pc for organ_name, pc in organ_pc_collection.items() if pc is not None and organ_name != "background"]+[o3d.geometry.TriangleMesh.create_coordinate_frame()])
-        o3d.visualization.draw([pc for organ_name, pc in organ_pc_collection.items() if pc is not None and organ_name != "background"])
+        o3d.visualization.draw([pc for organ_name, pc in organ_pc_collection.items() if pc is not None and organ_name != "background"], bg_color=(1.0, 1.0, 1.0, 1.0))
     except Exception as e:
         print(f"Error visualizing point clouds: {e}")
         return organ_pc_collection, organ_bool_lap
@@ -341,18 +354,29 @@ def get_3dlap(lap_path, label_classes=None, label_colors=None, logger=None):
     return organ_pc_collection, organ_bool_lap
 def get_3dct(ct_path, label_classes=None, label_colors=None):
     nii = nib.load(ct_path)
+    nii_gt = nib.load("/mnt/c/Users/uthaypre/OneDrive - ZHAW/Master/Masterarbeit/data/labelsTs_023/BDMAP_00000005.nii.gz")
+    # nii_org = nib.load("/mnt/d/projectsD/datasets/nnUNet/nnUNet_raw/Dataset023_AbdomenAtlas1.1Mini/imagesTs/input_ct_001_0000.nii.gz")
     ct_mask = nii.get_fdata()
+    gt = nii_gt.get_fdata()
+    # org = nii_org.get_fdata()
     A = nii.affine                       # 4x4
     ax = nib.aff2axcodes(A)              # e.g. ('L','P','S') or ('R','A','S')
+    zooms = nii.header.get_zooms()[:3]      # voxel spacing in mm
+    zooms_gt = nii_gt.header.get_zooms()[:3]      # voxel spacing in mm
     print(f"Image axes: {ax}  (affine maps voxel->scanner mm)")
 
     # # Optional LPS->RAS flip (scanner space)
     # LPS_to_RAS = np.diag([-1, -1, 1, 1])  # flips X,Y
 
     organ_collection = {}
+    organ_collection_gt = {}
+    down_organ_collection = {}
     organ_bool = []
     for label, organ in label_classes.items():
         organ_mask = (ct_mask == int(label)).astype(np.uint8)  # Create a mask for the specific organ
+        organ_mask_gt = (gt == int(label)).astype(np.uint8)  # Create a mask for the specific organ
+        # postprocess
+        # organ_mask = mask_postprocessing(organ_raw_mask, label, lap_path, label
         # Check if organ exists in the data
         if np.sum(organ_mask) == 0:
             print(f"Skipping {organ} (label {label}) - not present in this scan")
@@ -360,8 +384,8 @@ def get_3dct(ct_path, label_classes=None, label_colors=None):
             organ_collection[organ] = None
             continue
         organ_bool.append(True)
-        verts_xyz, faces, _, _ = measure.marching_cubes(organ_mask, level=0.5)  # Extract the mesh for the organ
-        
+        verts_xyz, faces, _, _ = measure.marching_cubes(organ_mask, level=0.5, spacing=zooms)  # Extract the mesh for the organ
+        verts_xyz_gt, faces_gt, _, _ = measure.marching_cubes(organ_mask_gt, level=0.5, spacing=zooms_gt)  # Extract the mesh for the organ
         # verts_xyz = verts_zyx[:, [2, 1, 0]]
         # ones = np.ones((verts_xyz.shape[0], 1), dtype=np.float64)
         # V_h = np.hstack([verts_xyz, ones])                 # Nx4
@@ -380,11 +404,29 @@ def get_3dct(ct_path, label_classes=None, label_colors=None):
         organ_mesh.compute_vertex_normals()
         organ_mesh.paint_uniform_color(label_colors[label])  # Assign a random color to each organ
         organ_collection[organ] = organ_mesh  # Store the organ name and mesh
+        down_organ_collection[organ] = organ_mesh.filter_smooth_taubin(number_of_iterations=10)
         cs_ct = organ_mesh.create_coordinate_frame(size=100)
         print(f"Organ: {organ}, label: {label}")
 
+        # gt
+        organ_mesh_gt = o3d.geometry.TriangleMesh()
+        organ_mesh_gt.vertices = o3d.utility.Vector3dVector(verts_xyz_gt)
+        organ_mesh_gt.triangles = o3d.utility.Vector3iVector(faces_gt)
+        organ_mesh_gt.compute_vertex_normals()
+        organ_mesh_gt.paint_uniform_color(label_colors[label])  # Assign a random color to each organ
+        organ_collection_gt[organ] = organ_mesh_gt.filter_smooth_taubin(number_of_iterations=10)  # Store the organ name and mesh 
+
+    # # CT org unsegmented mesh
+    # verts_xyz_org, faces_org, _, _ = measure.marching_cubes(org, level=300)
+    # org_mesh = o3d.geometry.TriangleMesh()
+    # org_mesh.vertices = o3d.utility.Vector3dVector(verts_xyz_org)
+    # org_mesh.triangles = o3d.utility.Vector3iVector(faces_org)
+    # org_mesh.compute_vertex_normals()
+    # org_mesh = org_mesh.filter_smooth_taubin(number_of_iterations=10)
+    # # o3d.visualization.draw_geometries([org_mesh])
+    # o3d.visualization.draw([organ_collection_gt[organ] for organ in organ_collection_gt], show_skybox=False)
     # Visualize the organ meshes
-    o3d.visualization.draw_geometries([organ_collection[organ] for organ in organ_collection]+[cs_ct])
+    # o3d.visualization.draw([down_organ_collection[organ] for organ in down_organ_collection], show_skybox=False)
     ## save point cloud
     # o3d.io.write_triangle_mesh(ct_path.parent / (Path(ct_path.stem).stem + ".obj"), [organ_collection[organ] for organ in organ_collection])  # Save the liver mesh as an example
     return organ_collection, organ_bool # both have length = 25
@@ -433,11 +475,11 @@ def smooth_edges(mask2d: np.ndarray, ksize: int = 5) -> np.ndarray:
     return (m >= 0.5).astype(np.uint8)      # threshold at 0.5 (returns {0,1})
 
 
-def mask_postprocessing(mask, erode_ksize=3,
+def mask_postprocessing(mask, label, lap_path, label_colors, erode_ksize=3,
                             dilate_ksize=3,
                             smooth_ksize=5):
     # clean up the mask
-
+    mask_before = mask.copy()
     erode_k  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_ksize, erode_ksize))
     dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_ksize, dilate_ksize))
     bin_ = (mask > 0).astype(np.uint8)
@@ -465,4 +507,22 @@ def mask_postprocessing(mask, erode_ksize=3,
 
     # 8) Smoothedges
     smooth = smooth_edges(filled, ksize=smooth_ksize)
+    mask_after = smooth.copy()
+    filename = os.path.basename(lap_path)
+    name_without_ext = os.path.splitext(filename)[0]
+    colored_before = np.zeros((mask.shape[0], mask.shape[1], 3))
+    colored_after = np.zeros((mask.shape[0], mask.shape[1], 3))
+    for label, color in label_colors.items():
+        if int(label) == 0:
+            continue  # Skip background
+        colored_before[mask == int(label)] = color
+        colored_after[smooth == int(label)] = color
+    colored_before = (colored_before * 255).astype(np.uint8)
+    colored_after = (colored_after * 255).astype(np.uint8)
+    combined_image = cv2.hconcat([colored_before, colored_after])
+    print(f"pre: {np.unique(mask_before)}, post: {np.unique(mask_after)}")
+    print(f"pre: {mask_before.dtype}, post: {mask_after.dtype}")
+    print(f"pre: {mask_before.shape}, post: {mask_after.shape}")
+    print(f"pre: {mask_before}")
+    cv2.imwrite(os.path.join(os.path.dirname(lap_path), f'{name_without_ext}_postprocessing.jpg'), combined_image[:, :, ::-1])
     return smooth

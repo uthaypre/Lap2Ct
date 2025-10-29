@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 from easydict import EasyDict as edict
 import cv2
-
+import time
 from lap2ct.nnunet import predict_nnunet, create_nnunet_args
 from lap2ct.utils import get_3dlap, get_3dct, get_overlay, get_depthmap, setup_logger, get_ball_marker, get_color_from_name, get_metric_depth, make_fov_box
 from lap2ct.registration import oareg, rigid_reg
@@ -76,26 +76,35 @@ def main(seed=42, voxel_size=1.817, logger=None):
         camera_pose_tracker = []
         
         for i, frame in enumerate(laparoscopy_frames, 1):
+            start_time = time.time()
             logger.info(f"Processing frame {i}/{len(laparoscopy_frames)}: {frame.name}")
             # Create args for Laparoscopy prediction
-            # laparoscopy_args = create_nnunet_args(
-            #     input_path=[[str(frame)]],
-            #     output_path=config.laparoscopy,
-            #     dataset_id=333,
-            #     config='2d',
-            #     fold='all',
-            #     save_probabilities=True,
-            #     model='nnUNetResEncUNetLPlans',
-            #     trainer='nnUNetTrainer_8000epochs',
-            #     checkpoint=config.nnunet_lap_weights)   
-
-            # logger.info(f"{frame.name}: Step 2: 3D Laparoscopy Reconstruction")
-            # logger.info(f"{frame.name}: Running nnUNet prediction for Laparoscopy data")
-            # # predict_nnunet(laparoscopy_args)
-            # logger.info(f"{frame.name}: Laparoscopy prediction completed successfully")
+            
+            laparoscopy_args = create_nnunet_args(
+                input_path=[[str(frame)]],
+                output_path=config.laparoscopy,
+                dataset_id=333,
+                config='2d',
+                fold='all',
+                save_probabilities=True,
+                model='nnUNetResEncUNetLPlans',
+                trainer='nnUNetTrainer_8000epochs',
+                checkpoint=config.nnunet_lap_weights)   
+            
+            logger.info(f"{frame.name}: Step 2: 3D Laparoscopy Reconstruction")
+            logger.info(f"{frame.name}: Running nnUNet prediction for Laparoscopy data")
+            seg_time_start = time.time()
+            predict_nnunet(laparoscopy_args)
+            seg_time_end = time.time()
+            logger.info(f"{frame.name}: Laparoscopy prediction completed in {seg_time_end - seg_time_start:.2f} seconds")
+            logger.info(f"{frame.name}: Laparoscopy prediction completed successfully")
 
             # logger.info(f"{frame.name}: Running Depth Anything for Laparoscopy frame")
-            # # lap_depth_map = get_depthmap(frame, outdir=config.laparoscopy, encoder='vitl', grayscale=False)
+            depth_time_start = time.time()
+            lap_depth_map = get_depthmap(frame, outdir=config.laparoscopy, encoder='vitl', grayscale=False)
+            depth_time_end = time.time()
+            logger.info(f"{frame.name}: Depth map generated in {depth_time_end - depth_time_start:.2f} seconds")
+            # logger.info(f"{frame.name}: Depth Anything completed successfully
             # lap_depth_map = get_metric_depth(org_path=frame)
             # logger.info(f"{frame.name}: Depth map generated successfully")
             mask_base = frame.stem.rsplit("_", 1)[0]  # remove last underscore chunk
@@ -114,6 +123,8 @@ def main(seed=42, voxel_size=1.817, logger=None):
             overlay = [{"name": "ct_pcd",  "geometry": ct_pcd_overlay, "material": mat_trans}]
             registered_organs_count = 0
             overlayed_organs = []
+            registered_lap_organs = []
+            registered_ct_organs = []
             for organ_name, lap_organ in lap_organs_pcd.items():
                 if lap_organ is None:
                     logger.info(f"{frame.name}: Skipping {organ_name} - no point cloud generated")
@@ -127,8 +138,10 @@ def main(seed=42, voxel_size=1.817, logger=None):
                 logger.info(f"{frame.name}: Found corresponding CT organ for {organ_name}")
                 # Perform rigid registration
                 logger.info(f"{frame.name}: Rigid Registering {organ_name} to CT organ")
+                rr_start = time.time()
                 transformed_lap_organ, init_transformation, reg_results = rigid_reg(source=lap_organ, target=ct_organs_pcd[organ_name], voxel_size=voxel_size, seed=seed, logger=logger)
-
+                rr_end = time.time()
+                logger.info(f"{frame.name}: Rigid registration for {organ_name} completed in {rr_end - rr_start:.2f} seconds")
                 if transformed_lap_organ is None or len(reg_results.correspondence_set) < 5:
                     logger.warning(f"{frame.name}: Rigid Registration failed for {organ_name} - not enough correspondences -> skipping registration")
                     continue
@@ -145,15 +158,22 @@ def main(seed=42, voxel_size=1.817, logger=None):
                     logger.info(f"{frame.name}: Rigid Registered {organ_name} successfully")
                     
                     logger.info(f"{frame.name}: Step 4: Starting non-rigid registration")
+                    nr_start = time.time()
+                    # Non-rigid registration
                     registered_lap_organ = oareg(transformed_lap_organ, ct_organs_pcd[organ_name])
+                    nr_end = time.time()
+                    logger.info(f"{frame.name}: Non-rigid registration for {organ_name} completed in {nr_end - nr_start:.2f} seconds")
+
                     current_color = get_color_from_name(organ_name, seg_config.lap_organ_classes, seg_config.lap_organ_colors)
                     logger.info(f"{frame.name}: Non-rigid registration completed for {organ_name}")
                     logger.debug(f"{frame.name}: Applying color to registered organ: {organ_name}")
                     registered_organs_count += 1
                     registered_lap_organ.paint_uniform_color(current_color)
                     overlay.append(registered_lap_organ)
-                    overlay.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(np.array([0, 0, 0])))
+                    # overlay.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(np.array([0, 0, 0])))
                     overlayed_organs.append(organ_name)
+                    registered_ct_organs.append(copy.deepcopy(ct_organs_pcd[organ_name]).paint_uniform_color(current_color))
+                    registered_lap_organs.append(copy.deepcopy(registered_lap_organ))
 
             logger.info(f"{frame.name}: Registration completed for frame {frame.name}. Successfully registered {registered_organs_count} organs")
 
@@ -171,11 +191,16 @@ def main(seed=42, voxel_size=1.817, logger=None):
             logger.info(f"{frame.name}: Camera pose estimated at {camera_pose} from {len(local_camera_poses)} organs (averaged)")
             camera_marker = get_ball_marker(camera_pose)
             camera_pose_tracker.append(camera_pose)
-            o3d.visualization.draw(overlay + [camera_marker], show_skybox=False)
+            # o3d.visualization.draw(registered_lap_organs, show_skybox=False)
+            # o3d.visualization.draw(registered_ct_organs, show_skybox=False)
+            # o3d.visualization.draw(registered_lap_organs + registered_ct_organs, show_skybox=False)
+            # o3d.visualization.draw(overlay + [camera_marker], show_skybox=False)
             # o3d.visualization.draw(overlay[1:] + [camera_marker], show_skybox=False)
             logger.info(f"{frame.name}: Second overlay consists of {overlay[1:]} and {camera_marker}")
             # organ_list_named = "_".join(overlayed_organs)
             # o3d.io.write_point_cloud(f"frame_{frame.name}_{organ_list_named}.ply", sum(overlay, camera_marker))
+            end_time = time.time()
+            logger.info(f"{frame.name}: Frame processed in {end_time - start_time:.2f} seconds")
         logger.info(f"All frames processed successfully (voxel_size={voxel_size}). Total camera poses tracked: {len(camera_pose_tracker)}")
         return 0
     except Exception as e:
